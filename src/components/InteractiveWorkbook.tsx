@@ -76,6 +76,22 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
   const [activeEditCell, setActiveEditCell] = useState<string | null>(null);
   const [cellFormulas, setCellFormulas] = useState<Record<string, string>>({});
 
+  // Dynamic Array Spilling state
+  const [spillInfo, setSpillInfo] = useState<
+    Record<string, { root: string; coords: string[]; formula: string }>
+  >({});
+  const [spillChildMap, setSpillChildMap] = useState<Record<string, string>>({}); // childCoord -> rootCoord
+
+  const spillCells = useMemo(() => {
+    const set = new Set<string>();
+    Object.values(spillInfo).forEach((s) => s.coords.forEach((c) => set.add(c)));
+    return set;
+  }, [spillInfo]);
+
+  const spillRoots = useMemo(() => {
+    return new Set(Object.keys(spillInfo));
+  }, [spillInfo]);
+
   // Formula bar value
   const [formulaInput, setFormulaInput] = useState('');
   const [evalResult, setEvalResult] = useState<EvaluationResult | null>(null);
@@ -99,6 +115,8 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
     setActiveCell(target);
     setActiveEditCell(null);
     setCellFormulas({});
+    setSpillInfo({});
+    setSpillChildMap({});
     setFormulaInput('');
     setEvalResult(null);
     setShowHint(false);
@@ -119,40 +137,34 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
     }
   }, [toastNotice]);
 
-  // Modify cell value in gridData (from in-cell editing or formula bar)
-  const handleCellChange = (coord: string, newValue: string) => {
+  // Select a cell and sync the formula bar with its exact content
+  const selectCell = (coord: string) => {
+    setActiveCell(coord);
+    setActiveEditCell(null);
+
+    // If this cell has a formula, show the formula in the formula bar
+    if (cellFormulas[coord]) {
+      setFormulaInput(cellFormulas[coord]);
+    } else if (spillChildMap[coord]) {
+      // Cell is part of a spilled dynamic array
+      const root = spillChildMap[coord];
+      setFormulaInput(cellFormulas[root] || '');
+    } else {
+      // Normal cell value (e.g. 'Boy', 250, or empty '')
+      const val = getCellValue(gridData, coord);
+      setFormulaInput(val !== null && val !== undefined ? String(val) : '');
+    }
+  };
+
+  // Direct cell update in gridData (with automatic row/column expansion)
+  const updateCellDirect = (coord: string, val: string | number | boolean | null) => {
     const parsed = parseCellAddress(coord);
     if (!parsed) return;
     const { colIndex, rowIndex } = parsed;
 
-    const isFormula = typeof newValue === 'string' && newValue.trim().startsWith('=');
-
-    let storedVal: any = newValue;
-    let evalRes: EvaluationResult | null = null;
-
-    if (isFormula) {
-      setCellFormulas((prev) => ({ ...prev, [coord]: newValue }));
-      setFormulaInput(newValue);
-
-      evalRes = evaluateFormula(newValue, gridData, targetResult);
-      setEvalResult(evalRes);
-
-      if (evalRes.isCorrect) {
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.8 },
-          colors: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6'],
-        });
-        onComplete();
-      }
-
-      // If evaluated successfully, show the calculated value in the cell
-      if (evalRes.value !== undefined && evalRes.value !== null) {
-        storedVal = evalRes.value;
-      }
-    } else {
-      const trimmed = typeof newValue === 'string' ? newValue.trim() : '';
+    let storedVal: any = val;
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
       if (trimmed === '') {
         storedVal = '';
       } else if (!isNaN(Number(trimmed)) && !trimmed.startsWith('0x')) {
@@ -162,13 +174,6 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
       } else if (trimmed.toUpperCase() === 'FALSE') {
         storedVal = false;
       }
-
-      setCellFormulas((prev) => {
-        const next = { ...prev };
-        delete next[coord];
-        return next;
-      });
-      setFormulaInput(String(storedVal));
     }
 
     setGridData((prev) => {
@@ -179,58 +184,234 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
         rows: prev.rows.map((r) => [...r]),
       };
 
+      // Expand columns if needed
+      while (next.columns.length <= colIndex) {
+        next.columns.push(indexToColLetter(next.columns.length));
+        next.headers.push('');
+      }
+
       if (rowIndex < 0) {
+        // Header row
         next.headers[colIndex] = String(storedVal);
       } else {
+        // Expand rows if needed
         while (next.rows.length <= rowIndex) {
           next.rows.push(new Array(next.columns.length).fill(''));
+        }
+        while (next.rows[rowIndex].length <= colIndex) {
+          next.rows[rowIndex].push('');
         }
         next.rows[rowIndex][colIndex] = storedVal;
       }
       return next;
     });
+  };
 
-    if (isFormula) {
-      setToastNotice(`Calculated ${coord}: ${storedVal}`);
+  // Clear previous dynamic array spill generated by a root cell
+  const clearPreviousSpill = (rootCoord: string) => {
+    setSpillInfo((prev) => {
+      const existing = prev[rootCoord];
+      if (!existing) return prev;
+
+      const oldCoords = existing.coords;
+      setGridData((currentGrid) => {
+        const next = {
+          ...currentGrid,
+          columns: [...currentGrid.columns],
+          headers: [...currentGrid.headers],
+          rows: currentGrid.rows.map((r) => [...r]),
+        };
+        oldCoords.forEach((c) => {
+          const p = parseCellAddress(c);
+          if (p && p.rowIndex >= 0 && p.rowIndex < next.rows.length) {
+            if (p.colIndex < next.rows[p.rowIndex].length) {
+              next.rows[p.rowIndex][p.colIndex] = '';
+            }
+          }
+        });
+        return next;
+      });
+
+      setSpillChildMap((currentChildMap) => {
+        const nextMap = { ...currentChildMap };
+        oldCoords.forEach((c) => delete nextMap[c]);
+        return nextMap;
+      });
+
+      const nextInfo = { ...prev };
+      delete nextInfo[rootCoord];
+      return nextInfo;
+    });
+  };
+
+  // Handle dynamic array spill into worksheet (like Excel UNIQUE, FILTER, SORT, SEQUENCE)
+  const handleSpillResult = (rootCoord: string, formulaStr: string, arr: any[]) => {
+    const parsed = parseCellAddress(rootCoord);
+    if (!parsed) return;
+    const { colIndex: startCol, rowIndex: startRow } = parsed;
+    const startRowNum = startRow + 2;
+
+    const is2D = arr.length > 0 && Array.isArray(arr[0]);
+    const spillCoords: string[] = [];
+    const updates: { coord: string; val: any; col: number; row: number }[] = [];
+
+    if (is2D) {
+      arr.forEach((rowArr: any[], rIdx: number) => {
+        const rNum = startRowNum + rIdx;
+        rowArr.forEach((cellVal: any, cIdx: number) => {
+          const cNum = startCol + cIdx;
+          const cLetter = indexToColLetter(cNum);
+          const coord = `${cLetter}${rNum}`;
+          spillCoords.push(coord);
+          updates.push({ coord, val: cellVal, col: cNum, row: rNum - 2 });
+        });
+      });
     } else {
-      setToastNotice(`Updated ${coord}: ${storedVal}`);
+      // 1D array spills vertically downwards
+      arr.forEach((itemVal: any, rIdx: number) => {
+        const rNum = startRowNum + rIdx;
+        const cLetter = indexToColLetter(startCol);
+        const coord = `${cLetter}${rNum}`;
+        spillCoords.push(coord);
+        updates.push({ coord, val: itemVal, col: startCol, row: rNum - 2 });
+      });
+    }
+
+    // Update gridData with all spilled items
+    setGridData((prev) => {
+      const next = {
+        ...prev,
+        columns: [...prev.columns],
+        headers: [...prev.headers],
+        rows: prev.rows.map((r) => [...r]),
+      };
+
+      const maxCol = Math.max(...updates.map((u) => u.col), next.columns.length - 1);
+      while (next.columns.length <= maxCol) {
+        next.columns.push(indexToColLetter(next.columns.length));
+        next.headers.push('');
+      }
+
+      const maxRow = Math.max(...updates.map((u) => u.row), next.rows.length - 1);
+      while (next.rows.length <= maxRow) {
+        next.rows.push(new Array(next.columns.length).fill(''));
+      }
+
+      updates.forEach((u) => {
+        if (u.row >= 0) {
+          while (next.rows[u.row].length < next.columns.length) {
+            next.rows[u.row].push('');
+          }
+          next.rows[u.row][u.col] = u.val;
+        }
+      });
+
+      return next;
+    });
+
+    setSpillInfo((prev) => ({
+      ...prev,
+      [rootCoord]: { root: rootCoord, coords: spillCoords, formula: formulaStr },
+    }));
+
+    setSpillChildMap((prev) => {
+      const next = { ...prev };
+      spillCoords.forEach((c) => {
+        next[c] = rootCoord;
+      });
+      return next;
+    });
+
+    setCellFormulas((prev) => ({ ...prev, [rootCoord]: formulaStr }));
+  };
+
+  // Evaluate formula in target cell and handle values / array spills
+  const executeFormulaInCell = (cellCoord: string, formulaStr: string) => {
+    const trimmed = formulaStr.trim();
+    setIsRunning(true);
+
+    clearPreviousSpill(cellCoord);
+
+    const res = evaluateFormula(trimmed, gridData, targetResult);
+    setEvalResult(res);
+    setIsRunning(false);
+
+    if (res.success && res.value !== undefined && res.value !== null) {
+      if (Array.isArray(res.value)) {
+        // Excel Dynamic Array Spill!
+        handleSpillResult(cellCoord, trimmed, res.value);
+      } else {
+        // Single scalar value
+        setCellFormulas((prev) => ({ ...prev, [cellCoord]: trimmed }));
+        updateCellDirect(cellCoord, res.value);
+      }
+    }
+
+    if (res.isCorrect) {
+      confetti({
+        particleCount: 50,
+        spread: 60,
+        origin: { y: 0.8 },
+        colors: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6'],
+      });
+      onComplete();
     }
   };
 
-  // Called when user submits formula bar (Enter key or Run/Enter button)
+  // Live Formula Bar input change (typing or deleting modifies active cell in real-time)
+  const handleFormulaBarChange = (newVal: string) => {
+    setFormulaInput(newVal);
+
+    if (!newVal.startsWith('=')) {
+      // Real Excel behavior: editing text or deleting in formula bar updates the active cell immediately
+      clearPreviousSpill(activeCell);
+
+      setCellFormulas((prev) => {
+        const next = { ...prev };
+        delete next[activeCell];
+        return next;
+      });
+
+      updateCellDirect(activeCell, newVal);
+    }
+  };
+
+  // Submit formula bar (Enter key or Calculate/Enter button)
   const handleFormulaBarSubmit = () => {
     const trimmed = formulaInput.trim();
     if (!trimmed) {
-      handleCellChange(activeCell, '');
+      clearPreviousSpill(activeCell);
+      updateCellDirect(activeCell, '');
+      setFormulaInput('');
       return;
     }
 
     if (trimmed.startsWith('=')) {
-      // Calculation mode
-      setIsRunning(true);
-      setCellFormulas((prev) => ({ ...prev, [activeCell]: trimmed }));
-
-      const res = evaluateFormula(trimmed, gridData, targetResult);
-      setEvalResult(res);
-      setIsRunning(false);
-
-      if (res.success && res.value !== undefined) {
-        handleCellChange(activeCell, res.value);
-      }
-
-      if (res.isCorrect) {
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.8 },
-          colors: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6'],
-        });
-        onComplete();
-      }
+      executeFormulaInCell(activeCell, trimmed);
     } else {
-      // Normal text entry mode: update active cell in worksheet
-      handleCellChange(activeCell, trimmed);
+      clearPreviousSpill(activeCell);
+      updateCellDirect(activeCell, trimmed);
       setToastNotice(`Saved "${trimmed}" to cell ${activeCell}`);
+    }
+  };
+
+  // In-cell edit commit (from double-tap or in-cell editing)
+  const handleCellChange = (coord: string, newValue: string) => {
+    const trimmed = typeof newValue === 'string' ? newValue.trim() : '';
+
+    if (trimmed.startsWith('=')) {
+      setFormulaInput(trimmed);
+      executeFormulaInCell(coord, trimmed);
+    } else {
+      clearPreviousSpill(coord);
+      setCellFormulas((prev) => {
+        const next = { ...prev };
+        delete next[coord];
+        return next;
+      });
+      updateCellDirect(coord, trimmed);
+      setFormulaInput(trimmed);
+      setToastNotice(`Updated ${coord}: ${trimmed}`);
     }
   };
 
@@ -242,15 +423,7 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
     if (isTypingFormulaWithRef) {
       setFormulaInput((prev) => `${prev}${coord}`);
     } else {
-      setActiveCell(coord);
-      setActiveEditCell(null);
-
-      if (cellFormulas[coord]) {
-        setFormulaInput(cellFormulas[coord]);
-      } else {
-        const val = getCellValue(gridData, coord);
-        setFormulaInput(val !== null && val !== undefined ? String(val) : '');
-      }
+      selectCell(coord);
     }
   };
 
@@ -276,15 +449,7 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
 
     const newColLetter = indexToColLetter(colIndex);
     const newCoord = `${newColLetter}${rowNum}`;
-    setActiveCell(newCoord);
-    setActiveEditCell(null);
-
-    if (cellFormulas[newCoord]) {
-      setFormulaInput(cellFormulas[newCoord]);
-    } else {
-      const val = getCellValue(gridData, newCoord);
-      setFormulaInput(val !== null && val !== undefined ? String(val) : '');
-    }
+    selectCell(newCoord);
   };
 
   const handleInsertEquals = () => {
@@ -296,8 +461,14 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
   };
 
   const handleClearCell = () => {
-    handleCellChange(activeCell, '');
+    clearPreviousSpill(activeCell);
+    updateCellDirect(activeCell, '');
     setFormulaInput('');
+    setCellFormulas((prev) => {
+      const next = { ...prev };
+      delete next[activeCell];
+      return next;
+    });
     setToastNotice(`Cleared cell ${activeCell}`);
   };
 
@@ -412,25 +583,24 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
         </div>
       </div>
 
-      {/* Live Spreadsheet Grid with Double-tap editing */}
+      {/* Live Spreadsheet Grid with Double-tap editing & Dynamic Array Spilling */}
       <SpreadsheetGrid
         dataset={gridData}
         referencedCells={referencedCells}
-        targetCell={targetCell || dataset.targetCell || 'C2'}
         selectedCell={activeCell}
         activeEditCell={activeEditCell}
         cellFormulas={cellFormulas}
-        computedValue={evalResult?.success ? evalResult.value : undefined}
-        isCorrect={evalResult?.isCorrect}
+        spillCells={spillCells}
+        spillRoots={spillRoots}
         onCellClick={handleCellClick}
         onCellChange={handleCellChange}
         onStartEdit={(coord) => setActiveCell(coord)}
       />
 
-      {/* Real-time Syntax-Highlighted Formula Bar */}
+      {/* Real-time Syntax-Highlighted Formula Bar with Live Cell Sync */}
       <FormulaBar
         value={formulaInput}
-        onChange={setFormulaInput}
+        onChange={handleFormulaBarChange}
         onRun={handleFormulaBarSubmit}
         isRunning={isRunning}
         activeCellLabel={activeCell}

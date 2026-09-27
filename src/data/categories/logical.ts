@@ -157,7 +157,7 @@ export const logicalFunctions: ExcelFunction[] = [
       {
         title: 'Pass or Fail Grading',
         scenario: 'In cell D2, if Student Score in B2 (68) is greater than or equal to Pass Mark in C2 (50), output "Pass", else "Fail".',
-        dataset: makePracticeDataset(['A', 'B', 'C', 'D'], ['Student', 'Score', 'PassMark', 'Result (fx)'], [['Emma', 68, 50, null], ['Noah', 42, 50, null]], 'Output in D2', 'D2'),
+        dataset: makePracticeDataset(['A', 'B', 'C', 'D'], ['Student', 'Score', 'PassMark', 'Grade'], [['Emma', 68, 50, null], ['Noah', 42, 50, null]], 'Output in D2', 'D2'),
         targetCell: 'D2',
         targetResult: 'Pass',
         targetResultDisplay: '"Pass"',

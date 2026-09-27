@@ -13,11 +13,13 @@ import { FunctionAutocompleteDropdown } from './FunctionAutocompleteDropdown';
 interface SpreadsheetGridProps {
   dataset: GridDataset;
   referencedCells?: Set<string>; // 'B2', 'B3', etc.
-  targetCell?: string; // Optional cell where formula output belongs
+  targetCell?: string; // Optional cell reference
   computedValue?: any; // Live computed value from evaluated formula
   isCorrect?: boolean; // Whether the evaluated formula matched target
   selectedCell?: string;
   cellFormulas?: Record<string, string>;
+  spillCells?: Set<string>;
+  spillRoots?: Set<string>;
   onCellClick?: (cellCoord: string, value: any) => void;
   onCellChange?: (cellCoord: string, newValue: string) => void;
   activeEditCell?: string | null;
@@ -34,6 +36,8 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
   isCorrect,
   selectedCell,
   cellFormulas = {},
+  spillCells = new Set(),
+  spillRoots = new Set(),
   onCellClick,
   onCellChange,
   activeEditCell,
@@ -273,7 +277,8 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                 1
               </th>
               {columnLetters.map((colLetter, cIdx) => {
-                const headerText = dataset.headers[cIdx] || `Col ${colLetter}`;
+                const rawHeaderText = dataset.headers[cIdx];
+                const headerText = rawHeaderText !== undefined && rawHeaderText !== null ? rawHeaderText : '';
                 const cellCoord = `${colLetter}1`;
                 const isReferenced = referencedCells.has(cellCoord);
                 const isSelected = selectedCell === cellCoord;
@@ -321,7 +326,7 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                         )}
                       </div>
                     ) : (
-                      <div className="truncate text-slate-300 font-semibold" title={headerText}>
+                      <div className="truncate text-slate-300 font-semibold min-h-[16px]" title={headerText}>
                         {headerText}
                       </div>
                     )}
@@ -362,19 +367,16 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
 
                   {columnLetters.map((colLetter, cIdx) => {
                     const cellCoord = `${colLetter}${rowNum}`;
-                    const isTarget = targetCell === cellCoord;
-                    const rawVal = isTarget && computedValue !== undefined && computedValue !== null
-                      ? computedValue
-                      : rowData[cIdx];
+                    const rawVal = rowData[cIdx];
                     const isReferenced = referencedCells.has(cellCoord);
                     const isSelected = selectedCell === cellCoord;
                     const isEditing = effectiveEditingCell === cellCoord;
+                    const isSpillRoot = spillRoots?.has(cellCoord);
+                    const isSpill = spillCells?.has(cellCoord);
 
                     const isNumeric =
                       typeof rawVal === 'number' ||
                       (!isNaN(Number(rawVal)) && rawVal !== '' && rawVal !== null && typeof rawVal !== 'boolean');
-
-                    const hasComputed = isTarget && computedValue !== undefined && computedValue !== null;
 
                     return (
                       <td
@@ -387,16 +389,14 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                         } ${
                           isEditing
                             ? 'p-0 bg-slate-950 ring-2 ring-emerald-400 z-30'
-                            : hasComputed
-                            ? isCorrect
-                              ? 'bg-emerald-950/90 text-emerald-200 ring-2 ring-emerald-400 ring-inset cell-highlight-active'
-                              : 'bg-rose-950/80 text-rose-200 ring-2 ring-rose-500 ring-inset'
-                            : isReferenced
-                            ? 'bg-emerald-950/70 text-emerald-200 ring-2 ring-emerald-500 ring-inset cell-highlight-active'
-                            : isTarget
-                            ? 'bg-amber-950/30 text-amber-200 ring-2 ring-dashed ring-amber-500/80 ring-inset'
                             : isSelected
-                            ? 'bg-blue-950/60 ring-2 ring-blue-500 ring-inset shadow-inner'
+                            ? 'bg-blue-950/70 text-blue-200 ring-2 ring-blue-500 ring-inset shadow-inner z-20'
+                            : isReferenced
+                            ? 'bg-emerald-950/70 text-emerald-200 ring-2 ring-emerald-500 ring-inset cell-highlight-active z-10'
+                            : isSpillRoot
+                            ? 'bg-cyan-950/40 text-cyan-200 ring-2 ring-cyan-500 ring-inset'
+                            : isSpill
+                            ? 'bg-cyan-950/20 text-cyan-200 ring-1 ring-cyan-500/50 ring-inset'
                             : 'hover:bg-slate-800/50'
                         }`}
                       >
@@ -429,18 +429,16 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                               className={`truncate ${
                                 isNumeric ? 'text-right font-mono' : 'text-left'
                               } ${
-                                rawVal === null || rawVal === undefined
-                                  ? 'text-slate-600 italic'
-                                  : hasComputed
-                                  ? isCorrect
-                                    ? 'text-emerald-100 font-bold'
-                                    : 'text-rose-100 font-semibold'
+                                rawVal === null || rawVal === undefined || rawVal === ''
+                                  ? 'text-slate-600'
                                   : isReferenced
                                   ? 'text-emerald-100 font-semibold'
+                                  : isSpillRoot || isSpill
+                                  ? 'text-cyan-200 font-medium'
                                   : 'text-slate-200'
                               }`}
                             >
-                              {rawVal !== null && rawVal !== undefined ? (
+                              {rawVal !== null && rawVal !== undefined && rawVal !== '' ? (
                                 typeof rawVal === 'boolean' ? (
                                   rawVal ? 'TRUE' : 'FALSE'
                                 ) : typeof rawVal === 'number' ? (
@@ -448,24 +446,20 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                                 ) : (
                                   String(rawVal)
                                 )
-                              ) : isTarget ? (
-                                <span className="text-[11px] text-amber-400 font-sans italic flex items-center gap-1">
-                                  <span className="font-mono font-bold bg-amber-500/20 px-1 rounded">fx</span> Target
-                                </span>
                               ) : (
                                 ''
                               )}
                             </div>
 
-                            {/* Cell coordinate badge when referenced or target */}
+                            {/* Cell coordinate badge when referenced or spill root */}
                             {isReferenced && (
                               <span className="absolute bottom-0.5 right-1 text-[8px] font-mono font-bold text-emerald-400/80 pointer-events-none select-none">
                                 {cellCoord}
                               </span>
                             )}
-                            {isTarget && !isReferenced && (
-                              <span className="absolute bottom-0.5 right-1 text-[8px] font-mono font-bold text-amber-400/80 pointer-events-none select-none">
-                                {cellCoord}
+                            {isSpillRoot && !isReferenced && (
+                              <span className="absolute bottom-0.5 right-1 text-[8px] font-mono font-bold text-cyan-400/80 pointer-events-none select-none">
+                                {cellCoord}#
                               </span>
                             )}
                           </>

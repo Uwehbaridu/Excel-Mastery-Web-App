@@ -7,37 +7,26 @@ export function makePracticeDataset(
   targetCellDescription?: string,
   targetCell?: string
 ): GridDataset {
-  // Ensure every dataset has 3 to 4 columns (A, B, C, D)
+  // Ensure every dataset has at least 4 columns (A, B, C, D) with clean blank columns for calculations
   let finalCols = [...columns];
   let finalHeaders = [...headers];
   let finalRows = rows.map((r) => [...r]);
 
-  // If only 1 column, expand to A, B, C (with B as Context/Ref, C as Result)
   if (finalCols.length === 1) {
-    finalCols = ['A', 'B', 'C'];
-    finalHeaders = [headers[0] || 'Value', 'Reference', 'Result (fx)'];
-    finalRows = finalRows.map((r, i) => [
-      r[0],
-      i === 0 ? 'Target Row' : `Row ${i + 1}`,
-      null, // C2 will receive the formula output
-    ]);
+    finalCols = ['A', 'B', 'C', 'D'];
+    finalHeaders = [headers[0] || 'Data', '', '', ''];
+    finalRows = finalRows.map((r) => [r[0], '', '', '']);
   } else if (finalCols.length === 2) {
-    // If 2 columns (A & B), expand to A, B, C (with C as Result)
-    finalCols = ['A', 'B', 'C'];
-    finalHeaders = [headers[0] || 'Col A', headers[1] || 'Col B', 'Result (fx)'];
-    finalRows = finalRows.map((r) => [r[0], r[1], null]);
+    finalCols = ['A', 'B', 'C', 'D'];
+    finalHeaders = [headers[0] || 'A', headers[1] || 'B', '', ''];
+    finalRows = finalRows.map((r) => [r[0], r[1], '', '']);
   } else if (finalCols.length === 3) {
-    // If 3 columns (A, B, C), if 3rd column is data, add Column D as Result (fx)
-    // Check if 3rd col already has data
-    const hasDataInThird = finalRows.some((r) => r[2] !== null && r[2] !== undefined);
-    if (hasDataInThird) {
-      finalCols = ['A', 'B', 'C', 'D'];
-      finalHeaders = [headers[0], headers[1], headers[2], 'Result (fx)'];
-      finalRows = finalRows.map((r) => [r[0], r[1], r[2], null]);
-    }
+    finalCols = ['A', 'B', 'C', 'D'];
+    finalHeaders = [headers[0] || 'A', headers[1] || 'B', headers[2] || 'C', ''];
+    finalRows = finalRows.map((r) => [r[0], r[1], r[2], '']);
   }
 
-  // Determine target cell (defaults to C2 if 3 cols, or D2 if 4 cols)
+  // Suggest a default starting active cell (defaults to C2 if 3 cols, or D2 if 4 cols)
   const resolvedTargetCell =
     targetCell || (finalCols.length >= 4 ? 'D2' : 'C2');
 
@@ -46,7 +35,7 @@ export function makePracticeDataset(
     headers: finalHeaders,
     rows: finalRows,
     targetCell: resolvedTargetCell,
-    targetCellDescription: targetCellDescription || `Output in ${resolvedTargetCell}`,
+    targetCellDescription: targetCellDescription || '',
   };
 }
 

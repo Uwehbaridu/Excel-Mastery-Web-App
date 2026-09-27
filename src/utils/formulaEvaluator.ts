@@ -213,6 +213,28 @@ const customExcelFunctions: Record<string, Function> = {
     const flat = arr.flat();
     return Array.from(new Set(flat));
   },
+  FILTER: (arr: any[], include: any, ifEmpty = '#CALC!') => {
+    if (!Array.isArray(arr)) return ifEmpty;
+    if (typeof include === 'boolean') {
+      return include ? arr : ifEmpty;
+    }
+    if (!Array.isArray(include)) return ifEmpty;
+    const res = arr.filter((_, idx) => Boolean(include[idx]));
+    return res.length > 0 ? res : ifEmpty;
+  },
+  SORTBY: (arr: any[], byArr: any[], sortOrder = 1) => {
+    if (!Array.isArray(arr) || !Array.isArray(byArr)) return arr;
+    const indices = arr.map((_, i) => i);
+    indices.sort((i, j) => {
+      const a = byArr[i];
+      const b = byArr[j];
+      if (typeof a === 'number' && typeof b === 'number') {
+        return sortOrder === 1 ? a - b : b - a;
+      }
+      return sortOrder === 1 ? String(a).localeCompare(String(b)) : String(b).localeCompare(String(a));
+    });
+    return indices.map((i) => arr[i]);
+  },
   SORT: (arr: any[], sortIndex = 1, sortOrder = 1) => {
     if (!Array.isArray(arr)) return [arr];
     const copy = [...arr];
@@ -466,10 +488,39 @@ export function evaluateFormula(formulaText: string, dataset: GridDataset, targe
       return varName;
     });
 
+    // Vector comparison helper for Excel array formulas (e.g. FILTER(A2:A10, B2:B10 > 50))
+    const compareHelper = (a: any, op: string, b: any) => {
+      const cmp = (x: any, y: any) => {
+        if (op === '>') return Number(x) > Number(y);
+        if (op === '<') return Number(x) < Number(y);
+        if (op === '>=') return Number(x) >= Number(y);
+        if (op === '<=') return Number(x) <= Number(y);
+        if (op === '=' || op === '===' || op === '==') {
+          return String(x).trim().toLowerCase() === String(y).trim().toLowerCase();
+        }
+        if (op === '<>' || op === '!==' || op === '!=') {
+          return String(x).trim().toLowerCase() !== String(y).trim().toLowerCase();
+        }
+        return false;
+      };
+
+      if (Array.isArray(a) && !Array.isArray(b)) {
+        return a.map((item) => cmp(item, b));
+      }
+      if (!Array.isArray(a) && Array.isArray(b)) {
+        return b.map((item) => cmp(a, item));
+      }
+      if (Array.isArray(a) && Array.isArray(b)) {
+        return a.map((item, i) => cmp(item, b[i]));
+      }
+      return cmp(a, b);
+    };
+
     // Build scope combining formulajs, customExcelFunctions, ranges, and cells
     const scope: Record<string, any> = {
       ...formulajs,
       ...customExcelFunctions,
+      __VECTOR_COMPARE__: compareHelper,
       // Common aliases
       TODAY: () => new Date(),
       NOW: () => new Date(),
@@ -483,17 +534,22 @@ export function evaluateFormula(formulaText: string, dataset: GridDataset, targe
       scope[key] = val;
     });
 
-    // Provide modern function fallbacks and case handling (e.g. sum -> SUM)
-    const upperFuncs = Object.keys(scope);
-    const scopeKeys = Object.keys(scope);
-    const scopeValues = Object.values(scope);
-
-    // Transform Excel operators if needed: <> to !==, = to === (when inside IF conditions), & to string concat
-    // Careful with strings inside quotes
     let transformed = jsExpression;
+
+    // Transform range comparisons like __RANGE_0__ > 50 to __VECTOR_COMPARE__(__RANGE_0__, '>', 50)
+    transformed = transformed.replace(
+      /(__RANGE_\d+__)\s*([><]=?|<>|=)\s*(__RANGE_\d+__|__CELL_\d+__|"[^"]*"|\d+(?:\.\d+)?|true|false)/gi,
+      (_, p1, op, p2) => `__VECTOR_COMPARE__(${p1}, '${op}', ${p2})`
+    );
 
     // Replace <> with !==
     transformed = transformed.replace(/<>/g, ' !== ');
+
+    // Replace single = (equality) with === when used in comparisons
+    transformed = transformed.replace(/([A-Za-z0-9_")\]])\s*=\s*([A-Za-z0-9_"(])/g, '$1 === $2');
+
+    const scopeKeys = Object.keys(scope);
+    const scopeValues = Object.values(scope);
 
     // Compile and execute in isolated function
     const fn = new Function(...scopeKeys, `
