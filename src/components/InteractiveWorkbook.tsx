@@ -119,7 +119,7 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
     }
   }, [toastNotice]);
 
-  // Modify cell value in gridData
+  // Modify cell value in gridData (from in-cell editing or formula bar)
   const handleCellChange = (coord: string, newValue: string) => {
     const parsed = parseCellAddress(coord);
     if (!parsed) return;
@@ -128,7 +128,30 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
     const isFormula = typeof newValue === 'string' && newValue.trim().startsWith('=');
 
     let storedVal: any = newValue;
-    if (!isFormula) {
+    let evalRes: EvaluationResult | null = null;
+
+    if (isFormula) {
+      setCellFormulas((prev) => ({ ...prev, [coord]: newValue }));
+      setFormulaInput(newValue);
+
+      evalRes = evaluateFormula(newValue, gridData, targetResult);
+      setEvalResult(evalRes);
+
+      if (evalRes.isCorrect) {
+        confetti({
+          particleCount: 50,
+          spread: 60,
+          origin: { y: 0.8 },
+          colors: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6'],
+        });
+        onComplete();
+      }
+
+      // If evaluated successfully, show the calculated value in the cell
+      if (evalRes.value !== undefined && evalRes.value !== null) {
+        storedVal = evalRes.value;
+      }
+    } else {
       const trimmed = typeof newValue === 'string' ? newValue.trim() : '';
       if (trimmed === '') {
         storedVal = '';
@@ -139,6 +162,13 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
       } else if (trimmed.toUpperCase() === 'FALSE') {
         storedVal = false;
       }
+
+      setCellFormulas((prev) => {
+        const next = { ...prev };
+        delete next[coord];
+        return next;
+      });
+      setFormulaInput(String(storedVal));
     }
 
     setGridData((prev) => {
@@ -161,26 +191,9 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
     });
 
     if (isFormula) {
-      setCellFormulas((prev) => ({ ...prev, [coord]: newValue }));
-      setFormulaInput(newValue);
-      const res = evaluateFormula(newValue, gridData, targetResult);
-      setEvalResult(res);
-      if (res.isCorrect) {
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.8 },
-          colors: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6'],
-        });
-        onComplete();
-      }
+      setToastNotice(`Calculated ${coord}: ${storedVal}`);
     } else {
-      setCellFormulas((prev) => {
-        const next = { ...prev };
-        delete next[coord];
-        return next;
-      });
-      setFormulaInput(String(storedVal));
+      setToastNotice(`Updated ${coord}: ${storedVal}`);
     }
   };
 
@@ -406,6 +419,7 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
         targetCell={targetCell || dataset.targetCell || 'C2'}
         selectedCell={activeCell}
         activeEditCell={activeEditCell}
+        cellFormulas={cellFormulas}
         computedValue={evalResult?.success ? evalResult.value : undefined}
         isCorrect={evalResult?.isCorrect}
         onCellClick={handleCellClick}

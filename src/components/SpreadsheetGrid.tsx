@@ -1,6 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GridDataset } from '../types/formula';
 import { indexToColLetter } from '../utils/formulaEvaluator';
+import { 
+  getActiveFunctionQuery, 
+  getFunctionSuggestions, 
+  applyFunctionSuggestion, 
+  FunctionSuggestion, 
+  AutocompleteTarget 
+} from '../utils/functionAutocomplete';
+import { FunctionAutocompleteDropdown } from './FunctionAutocompleteDropdown';
 
 interface SpreadsheetGridProps {
   dataset: GridDataset;
@@ -9,6 +17,7 @@ interface SpreadsheetGridProps {
   computedValue?: any; // Live computed value from evaluated formula
   isCorrect?: boolean; // Whether the evaluated formula matched target
   selectedCell?: string;
+  cellFormulas?: Record<string, string>;
   onCellClick?: (cellCoord: string, value: any) => void;
   onCellChange?: (cellCoord: string, newValue: string) => void;
   activeEditCell?: string | null;
@@ -24,6 +33,7 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
   computedValue,
   isCorrect,
   selectedCell,
+  cellFormulas = {},
   onCellClick,
   onCellChange,
   activeEditCell,
@@ -42,27 +52,35 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
   const lastTapRef = useRef<{ time: number; coord: string }>({ time: 0, coord: '' });
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // In-cell autocomplete state
+  const [inlineSuggestions, setInlineSuggestions] = useState<FunctionSuggestion[]>([]);
+  const [inlineSelectedIndex, setInlineSelectedIndex] = useState(0);
+  const [inlineActiveTarget, setInlineActiveTarget] = useState<AutocompleteTarget | null>(null);
+
   const effectiveEditingCell = activeEditCell !== undefined ? activeEditCell : internalEditingCell;
 
   // Sync edit mode input when activeEditCell changes externally
   useEffect(() => {
     if (activeEditCell) {
       setInternalEditingCell(activeEditCell);
-      // Find current value
-      const match = activeEditCell.match(/^([A-Z]+)(\d+)$/);
-      if (match) {
-        const colIdx = columnLetters.indexOf(match[1]);
-        const rowNum = parseInt(match[2], 10);
-        let currVal: any = '';
-        if (rowNum === 1) {
-          currVal = dataset.headers[colIdx] ?? '';
-        } else {
-          currVal = dataset.rows[rowNum - 2]?.[colIdx] ?? '';
+      if (cellFormulas[activeEditCell]) {
+        setInlineValue(cellFormulas[activeEditCell]);
+      } else {
+        const match = activeEditCell.match(/^([A-Z]+)(\d+)$/);
+        if (match) {
+          const colIdx = columnLetters.indexOf(match[1]);
+          const rowNum = parseInt(match[2], 10);
+          let currVal: any = '';
+          if (rowNum === 1) {
+            currVal = dataset.headers[colIdx] ?? '';
+          } else {
+            currVal = dataset.rows[rowNum - 2]?.[colIdx] ?? '';
+          }
+          setInlineValue(currVal !== null && currVal !== undefined ? String(currVal) : '');
         }
-        setInlineValue(currVal !== null && currVal !== undefined ? String(currVal) : '');
       }
     }
-  }, [activeEditCell, dataset]);
+  }, [activeEditCell, dataset, cellFormulas]);
 
   // Auto-focus inline input
   useEffect(() => {
@@ -74,7 +92,16 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
 
   const startEditing = (cellCoord: string, currentVal: any) => {
     setInternalEditingCell(cellCoord);
-    setInlineValue(currentVal !== null && currentVal !== undefined ? String(currentVal) : '');
+    // If formula exists for this cell, load the formula (e.g. =SUM(A2:B2))
+    const formula = cellFormulas[cellCoord];
+    const initial = formula !== undefined
+      ? formula
+      : currentVal !== null && currentVal !== undefined
+      ? String(currentVal)
+      : '';
+    setInlineValue(initial);
+    setInlineSuggestions([]);
+    setInlineActiveTarget(null);
     onStartEdit?.(cellCoord);
   };
 
@@ -90,15 +117,99 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
     }
   };
 
+  // Dedicated touch-end double tap handler for mobile
+  const handleCellTouchEnd = (e: React.TouchEvent, cellCoord: string, currentVal: any) => {
+    const now = Date.now();
+    if (lastTapRef.current.coord === cellCoord && (now - lastTapRef.current.time < 380)) {
+      e.preventDefault();
+      startEditing(cellCoord, currentVal);
+    } else {
+      lastTapRef.current = { time: now, coord: cellCoord };
+    }
+  };
+
+  const checkInlineAutocomplete = (val: string, caretPos?: number) => {
+    const target = getActiveFunctionQuery(val, caretPos);
+    if (target && target.query.length >= 1) {
+      const matches = getFunctionSuggestions(target.query);
+      if (matches.length > 0) {
+        setInlineSuggestions(matches);
+        setInlineSelectedIndex(0);
+        setInlineActiveTarget(target);
+        return;
+      }
+    }
+    setInlineSuggestions([]);
+    setInlineActiveTarget(null);
+  };
+
+  const handleInlineInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newVal = e.target.value;
+    setInlineValue(newVal);
+    checkInlineAutocomplete(newVal, e.target.selectionStart ?? newVal.length);
+  };
+
+  const handleSelectInlineSuggestion = (fn: FunctionSuggestion) => {
+    if (!inlineActiveTarget) return;
+    const { newText, newCaretPos } = applyFunctionSuggestion(inlineValue, inlineActiveTarget, fn.name);
+    setInlineValue(newText);
+    setInlineSuggestions([]);
+    setInlineActiveTarget(null);
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.setSelectionRange(newCaretPos, newCaretPos);
+      }
+    }, 20);
+  };
+
+  const handleInlineKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (inlineSuggestions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setInlineSelectedIndex((prev) => (prev + 1) % inlineSuggestions.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setInlineSelectedIndex((prev) => (prev - 1 + inlineSuggestions.length) % inlineSuggestions.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        handleSelectInlineSuggestion(inlineSuggestions[inlineSelectedIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setInlineSuggestions([]);
+        setInlineActiveTarget(null);
+        return;
+      }
+    }
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelEdit();
+    }
+  };
+
   const commitEdit = () => {
     if (effectiveEditingCell) {
       onCellChange?.(effectiveEditingCell, inlineValue);
       setInternalEditingCell(null);
+      setInlineSuggestions([]);
+      setInlineActiveTarget(null);
     }
   };
 
   const cancelEdit = () => {
     setInternalEditingCell(null);
+    setInlineSuggestions([]);
+    setInlineActiveTarget(null);
   };
 
   return (
@@ -173,6 +284,7 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                     key={cIdx}
                     onClick={() => handleCellClickOrDoubleTap(cellCoord, headerText)}
                     onDoubleClick={() => startEditing(cellCoord, headerText)}
+                    onTouchEnd={(e) => handleCellTouchEnd(e, cellCoord, headerText)}
                     className={`px-1 sm:px-2 py-1 sm:py-1.5 font-sans font-semibold text-[10px] sm:text-xs border-r border-b border-slate-700/80 transition-all relative ${
                       numCols <= 4 ? 'w-auto' : 'min-w-[90px]'
                     } ${
@@ -186,23 +298,28 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                     }`}
                   >
                     {isEditing ? (
-                      <input
-                        ref={inputRef}
-                        type="text"
-                        value={inlineValue}
-                        onChange={(e) => setInlineValue(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            commitEdit();
-                          } else if (e.key === 'Escape') {
-                            e.preventDefault();
-                            cancelEdit();
-                          }
-                        }}
-                        onBlur={commitEdit}
-                        className="w-full h-full min-h-[26px] px-1.5 py-1 text-[11px] sm:text-xs font-sans font-semibold bg-slate-950 text-emerald-200 border-none outline-none ring-2 ring-emerald-400 rounded-none"
-                      />
+                      <div className="relative w-full h-full min-h-[26px]">
+                        <input
+                          ref={inputRef}
+                          type="text"
+                          value={inlineValue}
+                          autoCapitalize="none"
+                          autoCorrect="off"
+                          autoComplete="off"
+                          onChange={handleInlineInputChange}
+                          onKeyDown={handleInlineKeyDown}
+                          onBlur={commitEdit}
+                          className="w-full h-full min-h-[26px] px-1.5 py-1 text-[11px] sm:text-xs font-sans font-semibold bg-slate-950 text-emerald-200 border-none outline-none ring-2 ring-emerald-400 rounded-none"
+                        />
+                        {inlineSuggestions.length > 0 && (
+                          <FunctionAutocompleteDropdown
+                            suggestions={inlineSuggestions}
+                            selectedIndex={inlineSelectedIndex}
+                            onSelect={handleSelectInlineSuggestion}
+                            query={inlineActiveTarget?.query || ''}
+                          />
+                        )}
+                      </div>
                     ) : (
                       <div className="truncate text-slate-300 font-semibold" title={headerText}>
                         {headerText}
@@ -264,6 +381,7 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                         key={cellCoord}
                         onClick={() => handleCellClickOrDoubleTap(cellCoord, rawVal)}
                         onDoubleClick={() => startEditing(cellCoord, rawVal)}
+                        onTouchEnd={(e) => handleCellTouchEnd(e, cellCoord, rawVal)}
                         className={`px-1 sm:px-2.5 py-1.5 sm:py-2 border-r border-slate-800 transition-all cursor-pointer relative text-[10px] sm:text-xs ${
                           numCols <= 4 ? 'w-auto' : 'min-w-[90px]'
                         } ${
@@ -283,23 +401,28 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                         }`}
                       >
                         {isEditing ? (
-                          <input
-                            ref={inputRef}
-                            type="text"
-                            value={inlineValue}
-                            onChange={(e) => setInlineValue(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                commitEdit();
-                              } else if (e.key === 'Escape') {
-                                e.preventDefault();
-                                cancelEdit();
-                              }
-                            }}
-                            onBlur={commitEdit}
-                            className="w-full h-full min-h-[26px] px-1.5 py-1 text-[11px] sm:text-xs font-mono bg-slate-950 text-emerald-200 border-none outline-none ring-2 ring-emerald-400 rounded-none"
-                          />
+                          <div className="relative w-full h-full min-h-[26px]">
+                            <input
+                              ref={inputRef}
+                              type="text"
+                              value={inlineValue}
+                              autoCapitalize="none"
+                              autoCorrect="off"
+                              autoComplete="off"
+                              onChange={handleInlineInputChange}
+                              onKeyDown={handleInlineKeyDown}
+                              onBlur={commitEdit}
+                              className="w-full h-full min-h-[26px] px-1.5 py-1 text-[11px] sm:text-xs font-mono bg-slate-950 text-emerald-200 border-none outline-none ring-2 ring-emerald-400 rounded-none"
+                            />
+                            {inlineSuggestions.length > 0 && (
+                              <FunctionAutocompleteDropdown
+                                suggestions={inlineSuggestions}
+                                selectedIndex={inlineSelectedIndex}
+                                onSelect={handleSelectInlineSuggestion}
+                                query={inlineActiveTarget?.query || ''}
+                              />
+                            )}
+                          </div>
                         ) : (
                           <>
                             <div

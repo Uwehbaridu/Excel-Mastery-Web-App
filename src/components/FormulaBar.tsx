@@ -1,5 +1,13 @@
-import React, { useMemo, useRef, useEffect } from 'react';
+import React, { useMemo, useRef, useEffect, useState } from 'react';
 import { extractReferencedCells } from '../utils/formulaEvaluator';
+import { 
+  getActiveFunctionQuery, 
+  getFunctionSuggestions, 
+  applyFunctionSuggestion, 
+  FunctionSuggestion, 
+  AutocompleteTarget 
+} from '../utils/functionAutocomplete';
+import { FunctionAutocompleteDropdown } from './FunctionAutocompleteDropdown';
 import { Play, Sparkles, AlertCircle, CheckCircle2, RotateCcw, CornerDownLeft } from 'lucide-react';
 
 interface FormulaBarProps {
@@ -136,6 +144,10 @@ export const FormulaBar: React.FC<FormulaBarProps> = ({
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const [suggestions, setSuggestions] = useState<FunctionSuggestion[]>([]);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [activeTarget, setActiveTarget] = useState<AutocompleteTarget | null>(null);
+
   const isFormula = value.trim().startsWith('=');
   const hasInput = value.trim().length > 0;
 
@@ -159,7 +171,66 @@ export const FormulaBar: React.FC<FormulaBarProps> = ({
     }
   }, [value]);
 
+  const checkAutocomplete = (val: string, caretPos?: number) => {
+    const target = getActiveFunctionQuery(val, caretPos);
+    if (target && target.query.length >= 1) {
+      const matches = getFunctionSuggestions(target.query);
+      if (matches.length > 0) {
+        setSuggestions(matches);
+        setSelectedIndex(0);
+        setActiveTarget(target);
+        return;
+      }
+    }
+    setSuggestions([]);
+    setActiveTarget(null);
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newVal = e.target.value;
+    onChange(newVal);
+    checkAutocomplete(newVal, e.target.selectionStart ?? newVal.length);
+  };
+
+  const handleSelectSuggestion = (fn: FunctionSuggestion) => {
+    if (!activeTarget) return;
+    const { newText, newCaretPos } = applyFunctionSuggestion(value, activeTarget, fn.name);
+    onChange(newText);
+    setSuggestions([]);
+    setActiveTarget(null);
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.setSelectionRange(newCaretPos, newCaretPos);
+      }
+    }, 20);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (suggestions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedIndex((prev) => (prev + 1) % suggestions.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        handleSelectSuggestion(suggestions[selectedIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSuggestions([]);
+        setActiveTarget(null);
+        return;
+      }
+    }
+
     if (e.key === 'Enter') {
       e.preventDefault();
       onRun();
@@ -168,13 +239,15 @@ export const FormulaBar: React.FC<FormulaBarProps> = ({
 
   const handleClear = () => {
     onChange('');
+    setSuggestions([]);
+    setActiveTarget(null);
     if (inputRef.current) {
       inputRef.current.focus();
     }
   };
 
   return (
-    <div className="flex flex-col gap-1.5 w-full bg-slate-900 border border-slate-700/80 rounded-xl p-2.5 shadow-lg shadow-black/30">
+    <div className="flex flex-col gap-1.5 w-full bg-slate-900 border border-slate-700/80 rounded-xl p-2.5 shadow-lg shadow-black/30 relative">
       <div className="flex items-center gap-2">
         {/* Active cell or fx badge */}
         <div className="flex items-center justify-center h-8 px-2.5 rounded-lg bg-slate-800 text-xs font-mono font-semibold text-emerald-400 border border-slate-700 select-none shrink-0 min-w-[42px]">
@@ -182,59 +255,73 @@ export const FormulaBar: React.FC<FormulaBarProps> = ({
         </div>
 
         {/* Input container with synchronized real-time syntax highlighter */}
-        <div className="relative flex-1 h-9 rounded-lg bg-slate-950 border border-slate-700/80 focus-within:border-emerald-500/80 focus-within:ring-1 focus-within:ring-emerald-500/50 transition-all overflow-hidden flex items-center">
-          {/* Syntax Highlighted Ghost Display (behind transparent input) */}
-          <div
-            aria-hidden="true"
-            className="absolute inset-0 px-3 py-1.5 font-mono text-sm tracking-tight whitespace-nowrap overflow-x-hidden pointer-events-none select-none flex items-center"
-          >
-            {value.length === 0 ? (
-              <span className="text-slate-500 italic select-none">{placeholder}</span>
-            ) : (
-              tokens.map((tok, idx) => {
-                let colorClass = 'text-slate-200';
-                if (tok.type === 'equals') colorClass = 'text-emerald-400 font-bold';
-                else if (tok.type === 'function') colorClass = 'text-cyan-400 font-semibold';
-                else if (tok.type === 'reference') colorClass = 'text-emerald-400 font-semibold underline decoration-emerald-500/40 decoration-wavy underline-offset-2';
-                else if (tok.type === 'string') colorClass = 'text-purple-300';
-                else if (tok.type === 'number') colorClass = 'text-amber-300';
-                else if (tok.type === 'operator') colorClass = 'text-slate-400 font-medium';
-                else if (tok.type === 'paren') {
-                  const depthIdx = ((tok.parenDepth ?? 1) - 1) % PAREN_COLORS.length;
-                  colorClass = PAREN_COLORS[Math.max(0, depthIdx)];
-                }
-                return (
-                  <span key={idx} className={colorClass}>
-                    {tok.text}
-                  </span>
-                );
-              })
+        <div className="relative flex-1">
+          <div className="relative w-full h-9 rounded-lg bg-slate-950 border border-slate-700/80 focus-within:border-emerald-500/80 focus-within:ring-1 focus-within:ring-emerald-500/50 transition-all overflow-hidden flex items-center">
+            {/* Syntax Highlighted Ghost Display (behind transparent input) */}
+            <div
+              aria-hidden="true"
+              className="absolute inset-0 px-3 py-1.5 font-mono text-sm tracking-tight whitespace-nowrap overflow-x-hidden pointer-events-none select-none flex items-center"
+            >
+              {value.length === 0 ? (
+                <span className="text-slate-500 italic select-none">{placeholder}</span>
+              ) : (
+                tokens.map((tok, idx) => {
+                  let colorClass = 'text-slate-200';
+                  if (tok.type === 'equals') colorClass = 'text-emerald-400 font-bold';
+                  else if (tok.type === 'function') colorClass = 'text-cyan-400 font-semibold';
+                  else if (tok.type === 'reference') colorClass = 'text-emerald-400 font-semibold underline decoration-emerald-500/40 decoration-wavy underline-offset-2';
+                  else if (tok.type === 'string') colorClass = 'text-purple-300';
+                  else if (tok.type === 'number') colorClass = 'text-amber-300';
+                  else if (tok.type === 'operator') colorClass = 'text-slate-400 font-medium';
+                  else if (tok.type === 'paren') {
+                    const depthIdx = ((tok.parenDepth ?? 1) - 1) % PAREN_COLORS.length;
+                    colorClass = PAREN_COLORS[Math.max(0, depthIdx)];
+                  }
+                  return (
+                    <span key={idx} className={colorClass}>
+                      {tok.text}
+                    </span>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Actual transparent input for caret & typing */}
+            <input
+              ref={inputRef}
+              type="text"
+              value={value}
+              disabled={disabled}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              placeholder=""
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+              autoComplete="off"
+              className="relative z-10 w-full h-full px-3 py-1.5 font-mono text-sm tracking-tight text-transparent caret-emerald-400 bg-transparent focus:outline-none"
+            />
+
+            {value.length > 0 && !disabled && (
+              <button
+                type="button"
+                onClick={handleClear}
+                className="relative z-20 mr-2 text-slate-400 hover:text-slate-200 p-1 rounded-md text-xs hover:bg-slate-800 transition-colors"
+                title="Clear formula"
+              >
+                ×
+              </button>
             )}
           </div>
 
-          {/* Actual transparent input for caret & typing */}
-          <input
-            ref={inputRef}
-            type="text"
-            value={value}
-            disabled={disabled}
-            onChange={(e) => onChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder=""
-            spellCheck={false}
-            autoCapitalize="characters"
-            className="relative z-10 w-full h-full px-3 py-1.5 font-mono text-sm tracking-tight text-transparent caret-emerald-400 bg-transparent focus:outline-none"
-          />
-
-          {value.length > 0 && !disabled && (
-            <button
-              type="button"
-              onClick={handleClear}
-              className="relative z-20 mr-2 text-slate-400 hover:text-slate-200 p-1 rounded-md text-xs hover:bg-slate-800 transition-colors"
-              title="Clear formula"
-            >
-              ×
-            </button>
+          {/* Autocomplete Dropdown List */}
+          {suggestions.length > 0 && (
+            <FunctionAutocompleteDropdown
+              suggestions={suggestions}
+              selectedIndex={selectedIndex}
+              onSelect={handleSelectSuggestion}
+              query={activeTarget?.query || ''}
+            />
           )}
         </div>
 
