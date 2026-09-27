@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useEffect } from 'react';
 import { extractReferencedCells } from '../utils/formulaEvaluator';
-import { Play, Sparkles, AlertCircle, CheckCircle2, RotateCcw } from 'lucide-react';
+import { Play, Sparkles, AlertCircle, CheckCircle2, RotateCcw, CornerDownLeft } from 'lucide-react';
 
 interface FormulaBarProps {
   value: string;
@@ -131,10 +131,13 @@ export const FormulaBar: React.FC<FormulaBarProps> = ({
   onReferencesChange,
   isRunning = false,
   activeCellLabel = 'fx',
-  placeholder = 'Type formula (e.g. =ABS(A2) or =SUM(B2:B10))...',
+  placeholder = 'Type text or start with = to calculate (e.g. =SUM(B2:B10))...',
   disabled = false,
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const isFormula = value.trim().startsWith('=');
+  const hasInput = value.trim().length > 0;
 
   // Purely memoize tokens for syntax highlighting without causing re-renders
   const tokens = useMemo(() => tokenizeFormula(value), [value]);
@@ -235,36 +238,65 @@ export const FormulaBar: React.FC<FormulaBarProps> = ({
           )}
         </div>
 
-        {/* Evaluate / Run Button */}
+        {/* Evaluate / Enter Button */}
         <button
           type="button"
           onClick={onRun}
-          disabled={disabled || !value.trim() || isRunning}
+          disabled={disabled || !hasInput || isRunning}
+          title={
+            isFormula
+              ? 'Calculate formula (Enter)'
+              : hasInput
+              ? 'Enter text into active cell (Enter)'
+              : 'Enter'
+          }
           className={`h-9 px-3.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold tracking-wide transition-all shrink-0 active:scale-95 ${
-            !value.trim() || disabled
+            !hasInput || disabled
               ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700/50'
-              : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-950/40 cursor-pointer'
+              : isFormula
+              ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-950/40 cursor-pointer'
+              : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-950/40 cursor-pointer'
           }`}
         >
-          <Play className="w-3.5 h-3.5 fill-current" />
-          <span className="hidden sm:inline">Run</span>
+          {isFormula ? (
+            <>
+              <Play className="w-3.5 h-3.5 fill-current text-white" />
+              <span className="hidden sm:inline">Calculate</span>
+            </>
+          ) : (
+            <>
+              <CornerDownLeft className="w-3.5 h-3.5 text-white" />
+              <span className="hidden sm:inline">Enter</span>
+            </>
+          )}
         </button>
       </div>
 
       {/* Syntax Guide quick indicators */}
       <div className="flex items-center justify-between text-[11px] text-slate-400 px-1 select-none">
         <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1 text-cyan-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span> Function
-          </span>
-          <span className="flex items-center gap-1 text-emerald-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Cell Range
-          </span>
-          <span className="flex items-center gap-1 text-amber-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span> ( ) Match
-          </span>
+          {isFormula ? (
+            <>
+              <span className="flex items-center gap-1 text-cyan-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span> Function
+              </span>
+              <span className="flex items-center gap-1 text-emerald-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Cell Range
+              </span>
+              <span className="flex items-center gap-1 text-amber-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span> ( ) Match
+              </span>
+            </>
+          ) : (
+            <span className="text-slate-300 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+              Text entry mode • Press <kbd className="px-1 py-0.2 rounded bg-slate-800 border border-slate-700 font-mono text-[10px]">Enter</kbd> to save to active cell
+            </span>
+          )}
         </div>
-        <span className="text-slate-500 text-[10px]">Press Enter or Tap Run</span>
+        <span className="text-slate-500 text-[10px]">
+          {isFormula ? 'Press Enter to Calculate' : 'Start with = for calculation'}
+        </span>
       </div>
     </div>
   );

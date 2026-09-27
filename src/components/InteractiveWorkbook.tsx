@@ -3,7 +3,15 @@ import confetti from 'canvas-confetti';
 import { GridDataset, PracticeExample, Puzzle } from '../types/formula';
 import { FormulaBar } from './FormulaBar';
 import { SpreadsheetGrid } from './SpreadsheetGrid';
-import { evaluateFormula, EvaluationResult, extractReferencedCells } from '../utils/formulaEvaluator';
+import { CellNavigator } from './CellNavigator';
+import { 
+  evaluateFormula, 
+  EvaluationResult, 
+  extractReferencedCells,
+  parseCellAddress,
+  indexToColLetter,
+  getCellValue
+} from '../utils/formulaEvaluator';
 import { 
   CheckCircle2, 
   XCircle, 
@@ -13,8 +21,8 @@ import {
   ChevronRight, 
   Lock, 
   Sparkles,
-  ArrowRight,
-  BookOpen
+  BookOpen,
+  X
 } from 'lucide-react';
 
 interface InteractiveWorkbookProps {
@@ -61,12 +69,23 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
   onUnlockProClick,
   onClose,
 }) => {
-  // Empty blank formula bar by default
+  // Live editable dataset clone
+  const [gridData, setGridData] = useState<GridDataset>(dataset);
+  const defaultTarget = targetCell || dataset.targetCell || 'C2';
+  const [activeCell, setActiveCell] = useState<string>(defaultTarget);
+  const [activeEditCell, setActiveEditCell] = useState<string | null>(null);
+  const [cellFormulas, setCellFormulas] = useState<Record<string, string>>({});
+
+  // Formula bar value
   const [formulaInput, setFormulaInput] = useState('');
   const [evalResult, setEvalResult] = useState<EvaluationResult | null>(null);
   const [showHint, setShowHint] = useState(false);
   const [showAnswer, setShowAnswer] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+
+  // Popup message notifying user they can edit worksheets
+  const [showSmartTip, setShowSmartTip] = useState(true);
+  const [toastNotice, setToastNotice] = useState<string | null>(null);
 
   // Directly derive referenced cells from formula input without extra states or effects
   const referencedCells = useMemo(() => {
@@ -75,38 +94,198 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
 
   // Reset state when dataset or scenario changes
   useEffect(() => {
+    setGridData(JSON.parse(JSON.stringify(dataset)));
+    const target = targetCell || dataset.targetCell || 'C2';
+    setActiveCell(target);
+    setActiveEditCell(null);
+    setCellFormulas({});
     setFormulaInput('');
     setEvalResult(null);
     setShowHint(false);
     setShowAnswer(false);
-  }, [scenario, targetResultDisplay]);
+    setShowSmartTip(true);
 
-  const handleRun = () => {
-    if (!formulaInput.trim()) return;
-    setIsRunning(true);
+    const timer = setTimeout(() => {
+      setShowSmartTip(false);
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [scenario, targetResultDisplay, currentIndex, dataset, targetCell]);
 
-    const res = evaluateFormula(formulaInput, dataset, targetResult);
-    setEvalResult(res);
-    setIsRunning(false);
+  // Auto-clear toast notice
+  useEffect(() => {
+    if (toastNotice) {
+      const t = setTimeout(() => setToastNotice(null), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [toastNotice]);
 
-    if (res.isCorrect) {
-      confetti({
-        particleCount: 50,
-        spread: 60,
-        origin: { y: 0.8 },
-        colors: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6'],
+  // Modify cell value in gridData
+  const handleCellChange = (coord: string, newValue: string) => {
+    const parsed = parseCellAddress(coord);
+    if (!parsed) return;
+    const { colIndex, rowIndex } = parsed;
+
+    const isFormula = typeof newValue === 'string' && newValue.trim().startsWith('=');
+
+    let storedVal: any = newValue;
+    if (!isFormula) {
+      const trimmed = typeof newValue === 'string' ? newValue.trim() : '';
+      if (trimmed === '') {
+        storedVal = '';
+      } else if (!isNaN(Number(trimmed)) && !trimmed.startsWith('0x')) {
+        storedVal = Number(trimmed);
+      } else if (trimmed.toUpperCase() === 'TRUE') {
+        storedVal = true;
+      } else if (trimmed.toUpperCase() === 'FALSE') {
+        storedVal = false;
+      }
+    }
+
+    setGridData((prev) => {
+      const next = {
+        ...prev,
+        columns: [...prev.columns],
+        headers: [...prev.headers],
+        rows: prev.rows.map((r) => [...r]),
+      };
+
+      if (rowIndex < 0) {
+        next.headers[colIndex] = String(storedVal);
+      } else {
+        while (next.rows.length <= rowIndex) {
+          next.rows.push(new Array(next.columns.length).fill(''));
+        }
+        next.rows[rowIndex][colIndex] = storedVal;
+      }
+      return next;
+    });
+
+    if (isFormula) {
+      setCellFormulas((prev) => ({ ...prev, [coord]: newValue }));
+      setFormulaInput(newValue);
+      const res = evaluateFormula(newValue, gridData, targetResult);
+      setEvalResult(res);
+      if (res.isCorrect) {
+        confetti({
+          particleCount: 50,
+          spread: 60,
+          origin: { y: 0.8 },
+          colors: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6'],
+        });
+        onComplete();
+      }
+    } else {
+      setCellFormulas((prev) => {
+        const next = { ...prev };
+        delete next[coord];
+        return next;
       });
-      onComplete();
+      setFormulaInput(String(storedVal));
     }
   };
 
-  const handleCellClick = (coord: string) => {
-    // Append or start formula with cell coordinate
-    if (!formulaInput) {
-      setFormulaInput(`=${coord}`);
-    } else {
-      setFormulaInput((prev) => `${prev}${coord}`);
+  // Called when user submits formula bar (Enter key or Run/Enter button)
+  const handleFormulaBarSubmit = () => {
+    const trimmed = formulaInput.trim();
+    if (!trimmed) {
+      handleCellChange(activeCell, '');
+      return;
     }
+
+    if (trimmed.startsWith('=')) {
+      // Calculation mode
+      setIsRunning(true);
+      setCellFormulas((prev) => ({ ...prev, [activeCell]: trimmed }));
+
+      const res = evaluateFormula(trimmed, gridData, targetResult);
+      setEvalResult(res);
+      setIsRunning(false);
+
+      if (res.success && res.value !== undefined) {
+        handleCellChange(activeCell, res.value);
+      }
+
+      if (res.isCorrect) {
+        confetti({
+          particleCount: 50,
+          spread: 60,
+          origin: { y: 0.8 },
+          colors: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6'],
+        });
+        onComplete();
+      }
+    } else {
+      // Normal text entry mode: update active cell in worksheet
+      handleCellChange(activeCell, trimmed);
+      setToastNotice(`Saved "${trimmed}" to cell ${activeCell}`);
+    }
+  };
+
+  // Cell click in grid
+  const handleCellClick = (coord: string) => {
+    const isTypingFormulaWithRef =
+      formulaInput.startsWith('=') && /[=+\-*/,(:&]$/.test(formulaInput.trim());
+
+    if (isTypingFormulaWithRef) {
+      setFormulaInput((prev) => `${prev}${coord}`);
+    } else {
+      setActiveCell(coord);
+      setActiveEditCell(null);
+
+      if (cellFormulas[coord]) {
+        setFormulaInput(cellFormulas[coord]);
+      } else {
+        const val = getCellValue(gridData, coord);
+        setFormulaInput(val !== null && val !== undefined ? String(val) : '');
+      }
+    }
+  };
+
+  // Navigate between cells with directional buttons below formula bar
+  const handleNavigate = (direction: 'up' | 'down' | 'left' | 'right') => {
+    const parsed = parseCellAddress(activeCell);
+    if (!parsed) return;
+    const numCols = Math.max(gridData.columns.length, gridData.headers.length);
+    const totalRows = Math.max(gridData.rows.length, 5);
+
+    let { colIndex, rowIndex } = parsed;
+    let rowNum = rowIndex + 2;
+
+    if (direction === 'up') {
+      rowNum = Math.max(1, rowNum - 1);
+    } else if (direction === 'down') {
+      rowNum = Math.min(totalRows + 1, rowNum + 1);
+    } else if (direction === 'left') {
+      colIndex = Math.max(0, colIndex - 1);
+    } else if (direction === 'right') {
+      colIndex = Math.min(numCols - 1, colIndex + 1);
+    }
+
+    const newColLetter = indexToColLetter(colIndex);
+    const newCoord = `${newColLetter}${rowNum}`;
+    setActiveCell(newCoord);
+    setActiveEditCell(null);
+
+    if (cellFormulas[newCoord]) {
+      setFormulaInput(cellFormulas[newCoord]);
+    } else {
+      const val = getCellValue(gridData, newCoord);
+      setFormulaInput(val !== null && val !== undefined ? String(val) : '');
+    }
+  };
+
+  const handleInsertEquals = () => {
+    setFormulaInput((prev) => (prev.startsWith('=') ? prev : `=${prev}`));
+  };
+
+  const handleStartInlineEdit = () => {
+    setActiveEditCell(activeCell);
+  };
+
+  const handleClearCell = () => {
+    handleCellChange(activeCell, '');
+    setFormulaInput('');
+    setToastNotice(`Cleared cell ${activeCell}`);
   };
 
   return (
@@ -175,6 +354,34 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
         </div>
       </div>
 
+      {/* Smart Worksheet Informational Pop-up message */}
+      {showSmartTip && (
+        <div className="relative flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-950/95 via-slate-900 to-cyan-950/90 border border-emerald-500/70 shadow-lg shadow-emerald-950/40 text-xs text-slate-200 animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex items-start gap-2.5">
+            <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 border border-emerald-500/40 mt-0.5">
+              <Sparkles className="w-4 h-4 text-emerald-300 animate-pulse" />
+            </div>
+            <div>
+              <div className="font-semibold text-emerald-300 text-xs flex items-center gap-1.5">
+                <span>Smart Worksheet Active</span>
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded font-mono font-medium border border-emerald-500/30">Editable</span>
+              </div>
+              <p className="text-[11px] text-slate-300 leading-normal mt-0.5">
+                You can edit and enter text into this worksheet! Double-tap any cell or type in the formula bar. Enter text to update cells, or start with <code className="text-emerald-400 font-bold bg-emerald-950/80 px-1 rounded border border-emerald-700/50">=</code> to calculate. Use the navigation buttons below the formula bar to move between cells.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setShowSmartTip(false)}
+            className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800 transition-colors shrink-0"
+            title="Dismiss message"
+            aria-label="Dismiss message"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Case Scenario & Target Goal Card */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 sm:p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="space-y-1 max-w-xl">
@@ -192,24 +399,46 @@ export const InteractiveWorkbook: React.FC<InteractiveWorkbookProps> = ({
         </div>
       </div>
 
-      {/* Live Spreadsheet Grid */}
+      {/* Live Spreadsheet Grid with Double-tap editing */}
       <SpreadsheetGrid
-        dataset={dataset}
+        dataset={gridData}
         referencedCells={referencedCells}
         targetCell={targetCell || dataset.targetCell || 'C2'}
+        selectedCell={activeCell}
+        activeEditCell={activeEditCell}
         computedValue={evalResult?.success ? evalResult.value : undefined}
         isCorrect={evalResult?.isCorrect}
         onCellClick={handleCellClick}
+        onCellChange={handleCellChange}
+        onStartEdit={(coord) => setActiveCell(coord)}
       />
 
       {/* Real-time Syntax-Highlighted Formula Bar */}
       <FormulaBar
         value={formulaInput}
         onChange={setFormulaInput}
-        onRun={handleRun}
+        onRun={handleFormulaBarSubmit}
         isRunning={isRunning}
-        activeCellLabel={targetCell || dataset.targetCell || 'C2'}
+        activeCellLabel={activeCell}
       />
+
+      {/* Navigation & Cell Control Toolbar Below Formula Bar */}
+      <CellNavigator
+        activeCell={activeCell}
+        onNavigate={handleNavigate}
+        onInsertEquals={handleInsertEquals}
+        onStartInlineEdit={handleStartInlineEdit}
+        onClearCell={handleClearCell}
+        isFormulaMode={formulaInput.trim().startsWith('=')}
+      />
+
+      {/* Toast Notice */}
+      {toastNotice && (
+        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-emerald-300 text-xs px-3.5 py-2 rounded-lg border border-emerald-500/60 shadow-xl shadow-black/50 animate-in fade-in slide-in-from-bottom-2 duration-200 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{toastNotice}</span>
+        </div>
+      )}
 
       {/* Feedback & Result Card */}
       {evalResult && (

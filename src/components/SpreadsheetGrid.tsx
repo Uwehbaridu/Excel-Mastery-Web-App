@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { GridDataset } from '../types/formula';
 import { indexToColLetter } from '../utils/formulaEvaluator';
 
@@ -10,6 +10,9 @@ interface SpreadsheetGridProps {
   isCorrect?: boolean; // Whether the evaluated formula matched target
   selectedCell?: string;
   onCellClick?: (cellCoord: string, value: any) => void;
+  onCellChange?: (cellCoord: string, newValue: string) => void;
+  activeEditCell?: string | null;
+  onStartEdit?: (cellCoord: string) => void;
   maxDisplayRows?: number;
   highlightColor?: string;
 }
@@ -22,6 +25,9 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
   isCorrect,
   selectedCell,
   onCellClick,
+  onCellChange,
+  activeEditCell,
+  onStartEdit,
   maxDisplayRows = 12,
 }) => {
   const numCols = Math.max(dataset.columns.length, dataset.headers.length);
@@ -29,6 +35,71 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
 
   // Determine active rows to display (at least dataset.rows.length, or up to maxDisplayRows if padded)
   const rowCount = Math.max(dataset.rows.length, 5);
+
+  // Local state for inline cell editing (from double-click/double-tap or props)
+  const [internalEditingCell, setInternalEditingCell] = useState<string | null>(null);
+  const [inlineValue, setInlineValue] = useState<string>('');
+  const lastTapRef = useRef<{ time: number; coord: string }>({ time: 0, coord: '' });
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const effectiveEditingCell = activeEditCell !== undefined ? activeEditCell : internalEditingCell;
+
+  // Sync edit mode input when activeEditCell changes externally
+  useEffect(() => {
+    if (activeEditCell) {
+      setInternalEditingCell(activeEditCell);
+      // Find current value
+      const match = activeEditCell.match(/^([A-Z]+)(\d+)$/);
+      if (match) {
+        const colIdx = columnLetters.indexOf(match[1]);
+        const rowNum = parseInt(match[2], 10);
+        let currVal: any = '';
+        if (rowNum === 1) {
+          currVal = dataset.headers[colIdx] ?? '';
+        } else {
+          currVal = dataset.rows[rowNum - 2]?.[colIdx] ?? '';
+        }
+        setInlineValue(currVal !== null && currVal !== undefined ? String(currVal) : '');
+      }
+    }
+  }, [activeEditCell, dataset]);
+
+  // Auto-focus inline input
+  useEffect(() => {
+    if (effectiveEditingCell && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [effectiveEditingCell]);
+
+  const startEditing = (cellCoord: string, currentVal: any) => {
+    setInternalEditingCell(cellCoord);
+    setInlineValue(currentVal !== null && currentVal !== undefined ? String(currentVal) : '');
+    onStartEdit?.(cellCoord);
+  };
+
+  const handleCellClickOrDoubleTap = (cellCoord: string, currentVal: any) => {
+    const now = Date.now();
+    const isDoubleTap = lastTapRef.current.coord === cellCoord && (now - lastTapRef.current.time < 380);
+    lastTapRef.current = { time: now, coord: cellCoord };
+
+    if (isDoubleTap) {
+      startEditing(cellCoord, currentVal);
+    } else {
+      onCellClick?.(cellCoord, currentVal);
+    }
+  };
+
+  const commitEdit = () => {
+    if (effectiveEditingCell) {
+      onCellChange?.(effectiveEditingCell, inlineValue);
+      setInternalEditingCell(null);
+    }
+  };
+
+  const cancelEdit = () => {
+    setInternalEditingCell(null);
+  };
 
   return (
     <div className="w-full bg-slate-900 border border-slate-700/80 rounded-xl overflow-hidden shadow-inner flex flex-col">
@@ -94,19 +165,49 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                 const headerText = dataset.headers[cIdx] || `Col ${colLetter}`;
                 const cellCoord = `${colLetter}1`;
                 const isReferenced = referencedCells.has(cellCoord);
+                const isSelected = selectedCell === cellCoord;
+                const isEditing = effectiveEditingCell === cellCoord;
+
                 return (
                   <td
                     key={cIdx}
-                    onClick={() => onCellClick?.(cellCoord, headerText)}
-                    className={`px-1 sm:px-2.5 py-1.5 sm:py-2 font-sans font-semibold text-[10px] sm:text-xs border-r border-b border-slate-700/80 transition-all ${
+                    onClick={() => handleCellClickOrDoubleTap(cellCoord, headerText)}
+                    onDoubleClick={() => startEditing(cellCoord, headerText)}
+                    className={`px-1 sm:px-2 py-1 sm:py-1.5 font-sans font-semibold text-[10px] sm:text-xs border-r border-b border-slate-700/80 transition-all relative ${
                       numCols <= 4 ? 'w-auto' : 'min-w-[90px]'
                     } ${
-                      isReferenced
+                      isEditing
+                        ? 'p-0 bg-slate-950 ring-2 ring-emerald-400 z-30'
+                        : isSelected
+                        ? 'bg-blue-950/70 text-blue-200 ring-2 ring-blue-500 ring-inset'
+                        : isReferenced
                         ? 'bg-emerald-950/80 text-emerald-200 ring-2 ring-emerald-500 ring-inset'
                         : 'text-slate-200 hover:bg-slate-800/60'
                     }`}
                   >
-                    <div className="truncate text-slate-300 font-semibold" title={headerText}>{headerText}</div>
+                    {isEditing ? (
+                      <input
+                        ref={inputRef}
+                        type="text"
+                        value={inlineValue}
+                        onChange={(e) => setInlineValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            commitEdit();
+                          } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            cancelEdit();
+                          }
+                        }}
+                        onBlur={commitEdit}
+                        className="w-full h-full min-h-[26px] px-1.5 py-1 text-[11px] sm:text-xs font-sans font-semibold bg-slate-950 text-emerald-200 border-none outline-none ring-2 ring-emerald-400 rounded-none"
+                      />
+                    ) : (
+                      <div className="truncate text-slate-300 font-semibold" title={headerText}>
+                        {headerText}
+                      </div>
+                    )}
                   </td>
                 );
               })}
@@ -150,6 +251,7 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                       : rowData[cIdx];
                     const isReferenced = referencedCells.has(cellCoord);
                     const isSelected = selectedCell === cellCoord;
+                    const isEditing = effectiveEditingCell === cellCoord;
 
                     const isNumeric =
                       typeof rawVal === 'number' ||
@@ -160,11 +262,14 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                     return (
                       <td
                         key={cellCoord}
-                        onClick={() => onCellClick?.(cellCoord, rawVal)}
+                        onClick={() => handleCellClickOrDoubleTap(cellCoord, rawVal)}
+                        onDoubleClick={() => startEditing(cellCoord, rawVal)}
                         className={`px-1 sm:px-2.5 py-1.5 sm:py-2 border-r border-slate-800 transition-all cursor-pointer relative text-[10px] sm:text-xs ${
                           numCols <= 4 ? 'w-auto' : 'min-w-[90px]'
                         } ${
-                          hasComputed
+                          isEditing
+                            ? 'p-0 bg-slate-950 ring-2 ring-emerald-400 z-30'
+                            : hasComputed
                             ? isCorrect
                               ? 'bg-emerald-950/90 text-emerald-200 ring-2 ring-emerald-400 ring-inset cell-highlight-active'
                               : 'bg-rose-950/80 text-rose-200 ring-2 ring-rose-500 ring-inset'
@@ -173,52 +278,74 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
                             : isTarget
                             ? 'bg-amber-950/30 text-amber-200 ring-2 ring-dashed ring-amber-500/80 ring-inset'
                             : isSelected
-                            ? 'bg-blue-950/60 ring-2 ring-blue-500 ring-inset'
+                            ? 'bg-blue-950/60 ring-2 ring-blue-500 ring-inset shadow-inner'
                             : 'hover:bg-slate-800/50'
                         }`}
                       >
-                        <div
-                          className={`truncate ${
-                            isNumeric ? 'text-right font-mono' : 'text-left'
-                          } ${
-                            rawVal === null || rawVal === undefined
-                              ? 'text-slate-600 italic'
-                              : hasComputed
-                              ? isCorrect
-                                ? 'text-emerald-100 font-bold'
-                                : 'text-rose-100 font-semibold'
-                              : isReferenced
-                              ? 'text-emerald-100 font-semibold'
-                              : 'text-slate-200'
-                          }`}
-                        >
-                          {rawVal !== null && rawVal !== undefined ? (
-                            typeof rawVal === 'boolean' ? (
-                              rawVal ? 'TRUE' : 'FALSE'
-                            ) : typeof rawVal === 'number' ? (
-                              rawVal.toLocaleString()
-                            ) : (
-                              String(rawVal)
-                            )
-                          ) : isTarget ? (
-                            <span className="text-[11px] text-amber-400 font-sans italic flex items-center gap-1">
-                              <span className="font-mono font-bold bg-amber-500/20 px-1 rounded">fx</span> Target
-                            </span>
-                          ) : (
-                            ''
-                          )}
-                        </div>
+                        {isEditing ? (
+                          <input
+                            ref={inputRef}
+                            type="text"
+                            value={inlineValue}
+                            onChange={(e) => setInlineValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                commitEdit();
+                              } else if (e.key === 'Escape') {
+                                e.preventDefault();
+                                cancelEdit();
+                              }
+                            }}
+                            onBlur={commitEdit}
+                            className="w-full h-full min-h-[26px] px-1.5 py-1 text-[11px] sm:text-xs font-mono bg-slate-950 text-emerald-200 border-none outline-none ring-2 ring-emerald-400 rounded-none"
+                          />
+                        ) : (
+                          <>
+                            <div
+                              className={`truncate ${
+                                isNumeric ? 'text-right font-mono' : 'text-left'
+                              } ${
+                                rawVal === null || rawVal === undefined
+                                  ? 'text-slate-600 italic'
+                                  : hasComputed
+                                  ? isCorrect
+                                    ? 'text-emerald-100 font-bold'
+                                    : 'text-rose-100 font-semibold'
+                                  : isReferenced
+                                  ? 'text-emerald-100 font-semibold'
+                                  : 'text-slate-200'
+                              }`}
+                            >
+                              {rawVal !== null && rawVal !== undefined ? (
+                                typeof rawVal === 'boolean' ? (
+                                  rawVal ? 'TRUE' : 'FALSE'
+                                ) : typeof rawVal === 'number' ? (
+                                  rawVal.toLocaleString()
+                                ) : (
+                                  String(rawVal)
+                                )
+                              ) : isTarget ? (
+                                <span className="text-[11px] text-amber-400 font-sans italic flex items-center gap-1">
+                                  <span className="font-mono font-bold bg-amber-500/20 px-1 rounded">fx</span> Target
+                                </span>
+                              ) : (
+                                ''
+                              )}
+                            </div>
 
-                        {/* Cell coordinate badge when referenced or target */}
-                        {isReferenced && (
-                          <span className="absolute bottom-0.5 right-1 text-[8px] font-mono font-bold text-emerald-400/80 pointer-events-none select-none">
-                            {cellCoord}
-                          </span>
-                        )}
-                        {isTarget && !isReferenced && (
-                          <span className="absolute bottom-0.5 right-1 text-[8px] font-mono font-bold text-amber-400/80 pointer-events-none select-none">
-                            {cellCoord}
-                          </span>
+                            {/* Cell coordinate badge when referenced or target */}
+                            {isReferenced && (
+                              <span className="absolute bottom-0.5 right-1 text-[8px] font-mono font-bold text-emerald-400/80 pointer-events-none select-none">
+                                {cellCoord}
+                              </span>
+                            )}
+                            {isTarget && !isReferenced && (
+                              <span className="absolute bottom-0.5 right-1 text-[8px] font-mono font-bold text-amber-400/80 pointer-events-none select-none">
+                                {cellCoord}
+                              </span>
+                            )}
+                          </>
                         )}
                       </td>
                     );
@@ -232,8 +359,8 @@ export const SpreadsheetGrid: React.FC<SpreadsheetGridProps> = ({
 
       {/* Grid Quick Helper Tip */}
       <div className="flex items-center justify-between px-3 py-1 bg-slate-950 text-[10px] text-slate-400 border-t border-slate-800 select-none">
-        <span>Tip: Tap any cell to view coordinate</span>
-        <span className="font-mono text-emerald-400">Green outline = formula active range</span>
+        <span className="truncate">Tip: Double-tap any cell or type in formula bar to edit • Use navigation buttons below</span>
+        <span className="font-mono text-emerald-400 shrink-0 ml-2">Smart Grid Active</span>
       </div>
     </div>
   );
