@@ -1,0 +1,8 @@
+{
+  "name": "Excel Formula Mastery Web App ",
+  "description": "Mobile-first Excel learning & practice app featuring a searchable formula library, interactive spreadsheet workbook with live cell highlighting, 9 practice scenarios per function, and 80 progressive business puzzles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
